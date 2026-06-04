@@ -147,7 +147,7 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-console.log('AUTH PROXY Server started');
+console.log('AUTH PROXY Server started - TCP Proxy Mode');
 console.log(`API URL: ${API_URL}`);
 console.log(`Ports: ${PORT_10050} → ${TARGET_CONFIG[PORT_10050].host}:${TARGET_CONFIG[PORT_10050].port}`);
 console.log(`Ports: ${PORT_10065} → ${TARGET_CONFIG[PORT_10065].host}:${TARGET_CONFIG[PORT_10065].port}`);
