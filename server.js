@@ -1,10 +1,8 @@
 import http from 'http';
-import https from 'https';
-import httpProxy from 'http-proxy';
+import net from 'net';
 import express from 'express';
-import fs from 'fs';
-import path from 'path';
 import { fileURLToPath } from 'url';
+import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url ));
 
@@ -13,16 +11,14 @@ const PORT_10050 = process.env.PORT_10050 || 10050;
 const PORT_10065 = process.env.PORT_10065 || 10065;
 const API_URL = process.env.API_URL || 'http://localhost:3000';
 
-// Criar proxy
-const proxy = httpProxy.createProxyServer({
-  changeOrigin: true,
-  ws: true,
-  timeout: 30000,
-  proxyTimeout: 30000,
-} );
+// Configuração de redirecionamento por porta
+const TARGET_CONFIG = {
+  [PORT_10050]: { host: '93.127.128.4', port: 10050 },
+  [PORT_10065]: { host: '69.197.176.242', port: 10065 },
+};
 
 // Middleware para logar requisições
-const logRequest = (req, res, next) => {
+const logRequest = (req, res, next ) => {
   const timestamp = new Date().toISOString();
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   
@@ -35,17 +31,6 @@ const logRequest = (req, res, next) => {
   
   next( );
 };
-
-// Tratamento de erros do proxy
-proxy.on('error', (err, req, res) => {
-  console.error('Proxy error:', err);
-  res.writeHead(502, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Proxy error', message: err.message }));
-});
-
-proxy.on('proxyRes', (proxyRes, req, res) => {
-  console.log(`  Response: ${proxyRes.statusCode}`);
-});
 
 // Criar aplicação Express
 const app = express();
@@ -91,32 +76,66 @@ app.post('/api/validate-key', express.json(), async (req, res) => {
   }
 });
 
-// Proxy para todas as outras requisições
-app.all('*', (req, res) => {
-  const targetUrl = process.env.TARGET_URL || 'http://example.com';
-  
-  console.log(`Proxying to: ${targetUrl}${req.url}` );
-  
-  proxy.web(req, res, { target: targetUrl });
+// Função para criar servidor TCP com redirecionamento
+const createTCPProxy = (listenPort, targetHost, targetPort) => {
+  const server = net.createServer((clientSocket) => {
+    const clientIp = clientSocket.remoteAddress;
+    console.log(`[${new Date().toISOString()}] TCP Connection from ${clientIp}:${clientSocket.remotePort}`);
+
+    // Conectar ao servidor de destino
+    const targetSocket = net.createConnection(targetPort, targetHost, () => {
+      console.log(`  Connected to ${targetHost}:${targetPort}`);
+    });
+
+    // Redirecionar dados do cliente para o servidor
+    clientSocket.pipe(targetSocket);
+    targetSocket.pipe(clientSocket);
+
+    // Tratamento de erros
+    clientSocket.on('error', (err) => {
+      console.error(`Client error: ${err.message}`);
+      targetSocket.destroy();
+    });
+
+    targetSocket.on('error', (err) => {
+      console.error(`Target error: ${err.message}`);
+      clientSocket.destroy();
+    });
+
+    // Fechar conexão
+    clientSocket.on('end', () => {
+      console.log(`  Client disconnected from ${clientIp}`);
+      targetSocket.end();
+    });
+
+    targetSocket.on('end', () => {
+      console.log(`  Target disconnected`);
+      clientSocket.end();
+    });
+  });
+
+  server.listen(listenPort, '0.0.0.0', () => {
+    console.log(`✓ TCP Proxy listening on port ${listenPort} → ${targetHost}:${targetPort}`);
+  });
+
+  return server;
+};
+
+// Criar servidor HTTP para health check e validação
+const httpServer = app.listen(3000, '0.0.0.0', ( ) => {
+  console.log('✓ HTTP server listening on port 3000 for health checks');
 });
 
-// Criar servidor HTTP na porta 10050
-const server10050 = http.createServer(app );
-server10050.listen(PORT_10050, '0.0.0.0', () => {
-  console.log(`✓ Proxy server listening on port ${PORT_10050}`);
-});
-
-// Criar servidor HTTP na porta 10065
-const server10065 = http.createServer(app );
-server10065.listen(PORT_10065, '0.0.0.0', () => {
-  console.log(`✓ Proxy server listening on port ${PORT_10065}`);
-});
+// Criar servidores TCP para proxy
+const server10050 = createTCPProxy(PORT_10050, TARGET_CONFIG[PORT_10050].host, TARGET_CONFIG[PORT_10050].port);
+const server10065 = createTCPProxy(PORT_10065, TARGET_CONFIG[PORT_10065].host, TARGET_CONFIG[PORT_10065].port);
 
 // Tratamento de sinais
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
   server10050.close(() => console.log('Server 10050 closed'));
   server10065.close(() => console.log('Server 10065 closed'));
+  httpServer.close(( ) => console.log('HTTP server closed'));
   process.exit(0);
 });
 
@@ -124,9 +143,11 @@ process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully');
   server10050.close(() => console.log('Server 10050 closed'));
   server10065.close(() => console.log('Server 10065 closed'));
+  httpServer.close(( ) => console.log('HTTP server closed'));
   process.exit(0);
 });
 
 console.log('AUTH PROXY Server started');
 console.log(`API URL: ${API_URL}`);
-console.log(`Ports: ${PORT_10050}, ${PORT_10065}`);
+console.log(`Ports: ${PORT_10050} → ${TARGET_CONFIG[PORT_10050].host}:${TARGET_CONFIG[PORT_10050].port}`);
+console.log(`Ports: ${PORT_10065} → ${TARGET_CONFIG[PORT_10065].host}:${TARGET_CONFIG[PORT_10065].port}`);
